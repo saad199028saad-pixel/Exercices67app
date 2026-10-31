@@ -185,6 +185,90 @@ const inline = p => p.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|[\s(])\*(\S(
 const rich = s => String(s ?? '').split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)/g).map((p, i) => (i % 2 ? charmap(tex(p.replace(/^\$\$?|\$\$?$/g, ''))) : charmap(inline(p)))).join('');
 /* PURE:END */
 
+/* ============ 1 quater. TABLEAUX DE CALCUL AUTOMATIQUES (moyenne, variance, écart-type) ============
+   Moteur pur (sans React) : colonnes de base x_i et n_i + colonnes calculées par opérations entre colonnes
+   (multiplication, addition, soustraction, carré). Chaque colonne calculée est décrite par une « spec »
+   { id, op, a, b, k } : `a` et `b` sont des identifiants de colonnes, `k` une constante (à la place de `b`). */
+/* CALC:START */
+const r12 = v => (Number.isFinite(v) ? Number(v.toPrecision(12)) : v);
+const fmtNum = (v, dec = 4) => {
+  if (!Number.isFinite(v)) return '—';
+  const r = Number(r12(v).toFixed(dec)); const [i, d] = Math.abs(r).toString().split('.');
+  return (r < 0 ? '−' : '') + i.replace(/\B(?=(\d{3})+(?!\d))/g, '\u00A0') + (d ? ',' + d : '');
+};
+const isExact = (v, dec = 4) => Number.isFinite(v) && Math.abs(Number(r12(v).toFixed(dec)) - r12(v)) < 1e-9;
+const fmtTeX = s => s.replace('−', '-').replace(',', '{,}').replace(/\u00A0/g, '\\,');
+
+const X9 = [...new Set(RAW9)].sort((a, b) => a - b); const NX9 = X9.map(v => RAW9.filter(u => u === v).length);
+const SERIES = {
+  s7: { label: 'Exercice 7 : série discrète', xh: 'x_i', x: N7.map((_, i) => i + 1), n: N7,
+    info: 'Valeurs x_i (nombre de clients) et effectifs n_i de l’énoncé.' },
+  s8: { label: 'Exercice 8 : données groupées', xh: 'c_i', x: CL8.map(([lo, hi]) => (lo + hi) / 2), n: N8,
+    info: 'Données groupées en classes : chaque classe est représentée par son centre c_i = (borne inf. + borne sup.) / 2.' },
+  s9: { label: 'Synthèse : temps de trajet', xh: 'x_i', x: X9, n: NX9,
+    info: 'Valeurs distinctes de la série (en minutes) avec leur effectif : ce tableau est exactement équivalent aux 21 observations brutes.' },
+};
+/* Questions qui disposent de l'atelier de calcul : série + tableau proposé par défaut (mean | var). */
+const CALC = { ex7q2: { s: 's7', preset: 'mean' }, ex7q3: { s: 's7', preset: 'var' }, ex7q5: { s: 's7', preset: 'var' },
+  ex8q2: { s: 's8', preset: 'var' }, ex8q3: { s: 's8', preset: 'var' },
+  synq2: { s: 's9', preset: 'mean' }, synq5: { s: 's9', preset: 'var' }, synq6: { s: 's9', preset: 'var' } };
+const MAXCOLS = 12;
+const OPS = { mul: { sym: '×', name: 'Multiplication', bin: true }, add: { sym: '+', name: 'Addition', bin: true },
+  sub: { sym: '−', name: 'Soustraction', bin: true }, sq: { sym: '²', name: 'Élévation au carré', bin: false } };
+const OPF = { mul: (p, q) => p * q, add: (p, q) => p + q, sub: (p, q) => p - q, sq: p => p * p };
+
+/** Évalue les colonnes : renvoie [x, n, ...colonnes calculées] avec valeurs, en-tête LaTeX, total Σ et « monôme » n^a·x^b (ou null). */
+const evalCols = (series, specs) => {
+  const out = [
+    { id: 'x', base: true, h: series.xh, vals: series.x, tot: sum(series.x), mono: { n: 0, x: 1 }, usesN: false },
+    { id: 'n', base: true, h: 'n_i', vals: series.n, tot: sum(series.n), mono: { n: 1, x: 0 }, usesN: true }];
+  const by = { x: out[0], n: out[1] };
+  const wrap = c => (c.op === 'add' || c.op === 'sub' ? `\\left(${c.h}\\right)` : c.h);
+  for (const s of specs) {
+    const f = OPF[s.op]; const A = by[s.a]; if (!f || !A) continue;
+    const bin = OPS[s.op].bin; const B = bin && s.b ? by[s.b] : null; if (bin && !B && s.k == null) continue;
+    const kt = s.k == null ? '' : fmtTeX(fmtNum(s.k, 6));
+    const vals = A.vals.map((p, i) => r12(f(p, bin ? (B ? B.vals[i] : s.k) : undefined)));
+    let h, mono = null;
+    if (s.op === 'sq') { h = A.base ? `${A.h}^2` : `\\left(${A.h}\\right)^2`; if (A.mono) mono = { n: 2 * A.mono.n, x: 2 * A.mono.x }; }
+    else if (s.op === 'mul') { h = B ? `${wrap(A)}\\,${wrap(B)}` : `${wrap(A)}\\cdot ${kt}`; if (B && A.mono && B.mono) mono = { n: A.mono.n + B.mono.n, x: A.mono.x + B.mono.x }; }
+    else if (s.op === 'add') h = `${A.h} + ${B ? B.h : kt}`;
+    else h = `${A.h} - ${B ? wrap(B) : kt}`;
+    const c = { id: s.id, base: false, op: s.op, h, vals, tot: r12(sum(vals)), mono, usesN: A.usesN || !!(B && B.usesN) };
+    out.push(c); by[s.id] = c;
+  }
+  return out;
+};
+/** Supprime une colonne calculée et, en cascade, toutes celles qui en dépendent. */
+const removeCol = (specs, id) => {
+  const gone = new Set([id]); let changed = true;
+  while (changed) { changed = false; specs.forEach(s => { if (!gone.has(s.id) && (gone.has(s.a) || (s.b && gone.has(s.b)))) { gone.add(s.id); changed = true; } }); }
+  return specs.filter(s => !gone.has(s.id));
+};
+const nextId = specs => 'k' + (Math.max(0, ...specs.map(s => +s.id.slice(1) || 0)) + 1);
+const hasMono = (series, specs, m) => evalCols(series, specs).find(c => c.mono && c.mono.n === m.n && c.mono.x === m.x);
+/** Garantit qu'une colonne de monôme n^a·x^b existe (la crée par opérations entre colonnes sinon). */
+const ensureMono = (series, specs, m) => {
+  const hit = hasMono(series, specs, m); if (hit) return { specs, id: hit.id };
+  if (m.n === 0 && m.x === 2) { const id = nextId(specs); return { specs: [...specs, { id, op: 'sq', a: 'x', b: null, k: null }], id }; }
+  if (m.n === 1 && m.x >= 1) {
+    const r = m.x === 1 ? { specs, id: 'x' } : ensureMono(series, specs, { n: 0, x: m.x });
+    const id = nextId(r.specs); return { specs: [...r.specs, { id, op: 'mul', a: 'n', b: r.id, k: null }], id };
+  }
+  return { specs, id: null };
+};
+/* Tableaux types : moyenne -> n_i x_i ; variance / écart-type -> n_i x_i, x_i², n_i x_i² */
+const PRESETS = { mean: [{ n: 1, x: 1 }], var: [{ n: 1, x: 1 }, { n: 0, x: 2 }, { n: 1, x: 2 }] };
+const applyPreset = (series, specs, key) => PRESETS[key].reduce((sp, m) => ensureMono(series, sp, m).specs, specs);
+/** Moyenne, variance (formule de König-Huygens, division par n) et écart-type déduits des totaux Σ. */
+const calcResults = ev => {
+  const n = ev[1].tot; const get = (a, b) => ev.find(c => c.mono && c.mono.n === a && c.mono.x === b); const c1 = get(1, 1), c2 = get(1, 2); const r = { n };
+  if (c1 && n) { r.s1 = c1.tot; r.mean = c1.tot / n; }
+  if (c2 && n) { r.s2 = c2.tot; if (r.mean != null) { r.var = Math.max(0, r12(c2.tot / n - r.mean * r.mean)); r.sd = Math.sqrt(r.var); } }
+  return r;
+};
+/* CALC:END */
+
 /* ============ 1 ter. AIDE PÉDAGOGIQUE : indices progressifs + corrections (exercice de synthèse) ============
    Indexée par identifiant de question. `hints` : indices affichés un par un ; `sol` / `after` : correction détaillée
    (formule, calcul, résultat, interprétation), `plot` : figure insérée entre `sol` et `after`. */
@@ -369,7 +453,7 @@ const grade = quiz => { const rows = (quiz?.order || []).map(id => { const q = Q
 const download = (name, blob) => { const u = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 15000); };
 const cellCount = (st, id) => Object.values(st.tables?.[id] || {}).filter(v => String(v).trim()).length;
 const textWords = (st, id) => words(st.answers[id]?.t || '');
-const answered = (st, id) => textWords(st, id) > 0 || cellCount(st, id) > 0;
+const answered = (st, id) => textWords(st, id) > 0 || cellCount(st, id) > 0 || (st.images?.[id]?.length || 0) > 0;
 const status = (st, id) => (st.answers[id]?.done ? 'Terminée' : answered(st, id) ? 'En cours' : 'Non traitée');
 
 /* ============ 3. COMPOSANTS UI ============ */
@@ -504,6 +588,116 @@ function Help({ id, st, upd, ready }) {
   </div>);
 }
 
+/* --- Atelier de calcul : tableau détaillé + opérations entre colonnes (moyenne, variance, écart-type) ---
+   L'état (colonnes calculées) est conservé dans st.calc[id] ; sans état, le tableau type de la question est proposé.
+   Cet outil est une aide au calcul : il ne modifie ni les tableaux à compléter, ni les réponses, ni la progression. */
+const plain = h => tex(h);
+const calcMd = (series, res) => {
+  const X = series.xh; const f = v => fmtTeX(fmtNum(v)); const eq = v => (isExact(v) ? '=' : '\\approx'); let md = '';
+  if (res.mean != null) md += R`$$
+\bar{x} = \dfrac{\sum n_i ${X}}{\sum n_i} = \dfrac{${f(res.s1)}}{${f(res.n)}} ${eq(res.mean)} ${f(res.mean)}
+$$
+
+`;
+  if (res.var != null) md += R`$$
+\sigma^2 = \dfrac{\sum n_i ${X}^2}{\sum n_i} - \bar{x}^2 = \dfrac{${f(res.s2)}}{${f(res.n)}} - \left(${f(res.mean)}\right)^2 ${eq(res.var)} ${f(res.var)}
+$$
+
+$$
+\sigma = \sqrt{\sigma^2} ${eq(res.sd)} ${f(res.sd)}
+$$
+`;
+  return md;
+};
+function CalcLab({ id, st, upd, locked }) {
+  const cfg = CALC[id]; const series = SERIES[cfg.s]; const stored = st.calc?.[id]?.cols;
+  const specs = useMemo(() => stored ?? applyPreset(series, [], cfg.preset), [stored, series, cfg.preset]);
+  const ev = useMemo(() => evalCols(series, specs), [series, specs]);
+  const res = useMemo(() => calcResults(ev), [ev]);
+  const [op, setOp] = useState('mul'); const [a, setA] = useState('n'); const [b, setB] = useState('x'); const [ks, setKs] = useState('');
+  const ids = ev.map(c => c.id); const A = ids.includes(a) ? a : ids[0]; const B = b === '#k' || ids.includes(b) ? b : ids[0];
+  const bin = OPS[op].bin; const kp = bin && B === '#k' ? parseNum(ks) : null; const ready = !bin || B !== '#k' || !!kp; const full = specs.length >= MAXCOLS;
+  const draft = { id: nextId(specs), op, a: A, b: bin && B !== '#k' ? B : null, k: kp ? kp.v : null };
+  const pe = ready ? evalCols(series, [...specs, draft]) : ev; const ph = ready && pe.length > ev.length ? pe[pe.length - 1].h : null;
+  const setSpecs = next => upd(s => ({ ...s, calc: { ...(s.calc || {}), [id]: { cols: next } } }));
+  const reset = () => upd(s => { const c = { ...(s.calc || {}) }; delete c[id]; return { ...s, calc: c }; });
+  const md = calcMd(series, res); const missing = [res.mean == null && 'la moyenne', res.var == null && 'la variance et l’écart-type'].filter(Boolean);
+  return (<div className="stat-wrap calc-wrap">
+    <div className="stat-head"><h3>Tableau de calcul : {series.label}</h3><span className="badge">{specs.length} colonne(s) calculée(s)</span></div>
+    <p className="small muted">{series.info} Les colonnes calculées et la ligne Σ se mettent à jour automatiquement. Cet outil est une aide : il ne remplit pas vos tableaux et n’affecte pas votre progression.</p>
+    <div className="row wrap calc-presets">
+      <button className="btn" disabled={locked || full} onClick={() => setSpecs(applyPreset(series, specs, 'mean'))}>Colonnes pour la moyenne</button>
+      <button className="btn" disabled={locked || full} onClick={() => setSpecs(applyPreset(series, specs, 'var'))}>Colonnes pour la variance et l’écart-type</button>
+      <button className="btn" disabled={locked || !stored} onClick={reset}>Réinitialiser</button></div>
+    <div className="tscroll"><table className="stat calc"><caption>{series.label} : valeurs, effectifs et colonnes calculées (Σ = total de la colonne).</caption>
+      <thead><tr>{ev.map(c => <th key={c.id} scope="col"><TeX>{c.h}</TeX>{!c.base && !locked && <button className="colx" title="Supprimer cette colonne (et celles qui en dépendent)" aria-label={`Supprimer la colonne ${plain(c.h)}`} onClick={() => setSpecs(removeCol(specs, c.id))}>×</button>}</th>)}</tr></thead>
+      <tbody>{series.x.map((_, i) => <tr key={i}>{ev.map(c => <td key={c.id} className={c.base ? 'given' : ''}>{fmtNum(c.vals[i])}</td>)}</tr>)}
+        <tr className="total">{ev.map((c, j) => <td key={c.id} className={!j ? '' : c.usesN ? '' : 'nosum'} title={!j || c.usesN ? undefined : 'Cette colonne ne tient pas compte des effectifs : sa somme est donnée à titre indicatif.'}>{!j ? 'Σ' : fmtNum(c.tot)}</td>)}</tr></tbody></table></div>
+    <div className="calc-op" role="group" aria-label="Opération entre colonnes">
+      <b className="calc-ttl">Nouvelle colonne</b>
+      <label><span>Opération</span><select value={op} disabled={locked || full} onChange={e => setOp(e.target.value)}>{Object.entries(OPS).map(([k, o]) => <option key={k} value={k}>{o.name} ({o.sym})</option>)}</select></label>
+      <label><span>{bin ? 'Colonne A' : 'Colonne'}</span><select value={A} disabled={locked || full} onChange={e => setA(e.target.value)}>{ev.map(c => <option key={c.id} value={c.id}>{plain(c.h)}</option>)}</select></label>
+      {bin && <><span className="opsym" aria-hidden="true">{OPS[op].sym}</span>
+        <label><span>Colonne B ou constante</span><select value={B} disabled={locked || full} onChange={e => setB(e.target.value)}>{ev.map(c => <option key={c.id} value={c.id}>{plain(c.h)}</option>)}<option value="#k">Constante (nombre)…</option></select></label>
+        {B === '#k' && <label><span>Valeur</span><input value={ks} disabled={locked || full} inputMode="decimal" autoComplete="off" spellCheck="false" aria-invalid={!!ks.trim() && !kp} placeholder="ex. 2,5" onChange={e => setKs(sanitizeCell(e.target.value))} /></label>}</>}
+      <div className="calc-prev small">{ph ? <>Résultat : <TeX>{ph}</TeX></> : <span className="muted">{ready ? '' : 'Saisissez une constante valide.'}</span>}</div>
+      <button className="btn primary" disabled={locked || full || !ready} onClick={() => setSpecs([...specs, draft])}>Créer la colonne</button></div>
+    {full && <p className="small muted">Nombre maximal de colonnes calculées atteint ({MAXCOLS}) : supprimez-en une pour continuer.</p>}
+    {(md || missing.length > 0) && <div className="calc-res" role="status" aria-live="polite"><p className="eyebrow">Résultats déduits des totaux Σ</p>
+      {md && <MD>{md}</MD>}
+      {missing.length > 0 && <p className="small muted">Pour obtenir {missing.join(' et ')}, utilisez les boutons ci-dessus ou créez vous-même les colonnes nécessaires avec les opérations entre colonnes.</p>}
+      <div className="small muted calc-note">Variance : formule de König-Huygens avec division par <TeX>n</TeX>, comme dans l’énoncé.</div></div>}
+  </div>);
+}
+
+/* --- Espace de visualisation : import d'images (diagrammes réalisés ailleurs) depuis l'ordinateur --- */
+const IMG_MAX = 3; const IMG_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']; const IMG_BUDGET = 3200000;
+const loadImage = file => new Promise((ok, ko) => { const u = URL.createObjectURL(file); const im = new Image();
+  im.onload = () => { URL.revokeObjectURL(u); ok(im); }; im.onerror = () => { URL.revokeObjectURL(u); ko(new Error('Image illisible ou corrompue.')); }; im.src = u; });
+/** Réduit l'image (côté max 1400 px) et la convertit en JPEG pour rester sous le quota du stockage local du navigateur. */
+async function compressImage(file) {
+  const im = await loadImage(file); const w0 = im.naturalWidth, h0 = im.naturalHeight; if (!w0 || !h0) throw new Error('Dimensions d’image invalides.');
+  let best = null;
+  for (const side of [1400, 1200, 1000, 800, 640]) for (const q of [0.85, 0.72, 0.58]) {
+    const k = Math.min(1, side / Math.max(w0, h0)); const cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w0 * k)); cv.height = Math.max(1, Math.round(h0 * k));
+    const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(im, 0, 0, cv.width, cv.height);
+    best = { data: cv.toDataURL('image/jpeg', q), w: cv.width, h: cv.height }; if (best.data.length <= 220000) return best;
+  }
+  return best;
+}
+function VizSpace({ id, imgs, total, locked, onAdd, onDel, onCap, notify }) {
+  const inp = useRef(null); const [over, setOver] = useState(false); const [busy, setBusy] = useState(false); const [zoom, setZoom] = useState(null);
+  useEffect(() => { if (!zoom) return; const k = e => e.key === 'Escape' && setZoom(null); window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, [zoom]);
+  const take = async files => {
+    const list = [...files]; if (!list.length || locked) return; setBusy(true); let room = IMG_MAX - imgs.length, used = total, added = 0;
+    for (const f of list) {
+      if (room <= 0) { notify(`Maximum ${IMG_MAX} images par question : supprimez-en une pour en ajouter.`, true); break; }
+      if (!IMG_TYPES.includes(f.type)) { notify(`« ${f.name} » : format non pris en charge (PNG, JPEG, WebP, GIF ou BMP).`, true); continue; }
+      if (f.size > 15 * 1024 * 1024) { notify(`« ${f.name} » dépasse 15 Mo.`, true); continue; }
+      try {
+        const c = await compressImage(f);
+        if (used + c.data.length > IMG_BUDGET) { notify('Espace de stockage local insuffisant pour cette image : supprimez une image existante ou utilisez une image plus légère.', true); break; }
+        onAdd({ id: uid(), name: f.name.slice(0, 80), data: c.data, w: c.w, h: c.h, cap: '', at: new Date().toISOString() }); room--; used += c.data.length; added++;
+      } catch (e) { notify(`« ${f.name} » : ${e.message || 'import impossible.'}`, true); }
+    }
+    setBusy(false); if (added) notify(`${added} image${added > 1 ? 's' : ''} importée${added > 1 ? 's' : ''}.`);
+  };
+  return (<div className="viz">
+    <p className="small muted">Réalisez votre diagramme (sur papier, avec un tableur ou un logiciel de dessin) puis importez-le ici : {IMG_MAX} images au plus par question, formats PNG, JPEG, WebP, GIF ou BMP. Les images sont réduites (1 400 px maximum), conservées uniquement dans votre navigateur et ajoutées au rapport PDF.</p>
+    <div className={'viz-drop' + (over ? ' over' : '')} onDragOver={e => { if (!locked) { e.preventDefault(); setOver(true); } }} onDragLeave={() => setOver(false)} onDrop={e => { e.preventDefault(); setOver(false); take(e.dataTransfer.files); }}>
+      <input ref={inp} type="file" accept={IMG_TYPES.join(',')} multiple hidden aria-label="Choisir des images à importer" onChange={e => { take(e.target.files); e.target.value = ''; }} />
+      <button className="btn primary" disabled={locked || busy || imgs.length >= IMG_MAX} onClick={() => inp.current?.click()}>{busy ? 'Import en cours…' : 'Importer une image…'}</button>
+      <p className="small muted">ou glissez-déposez vos images ici · {imgs.length} / {IMG_MAX}</p></div>
+    {imgs.length > 0 && <div className="viz-grid">{imgs.map(m => <figure className="viz-item" key={m.id}>
+      <img src={m.data} alt={m.cap || m.name} onClick={() => setZoom(m)} />
+      <figcaption><input className="viz-cap" value={m.cap || ''} maxLength={140} disabled={locked} placeholder="Légende (facultatif)" aria-label={`Légende de l’image ${m.name}`} onChange={e => onCap(m.id, e.target.value)} />
+        <span className="row between small"><span className="muted viz-name" title={m.name}>{m.name}</span><span><button className="link" onClick={() => setZoom(m)}>Agrandir</button>{!locked && <> · <button className="link" onClick={() => onDel(m.id)}>Supprimer</button></>}</span></span></figcaption></figure>)}</div>}
+    {zoom && <div className="overlay" role="dialog" aria-modal="true" aria-label="Image agrandie" onClick={() => setZoom(null)}><div className="lightbox" onClick={e => e.stopPropagation()}>
+      <img src={zoom.data} alt={zoom.cap || zoom.name} />{zoom.cap && <p className="small">{zoom.cap}</p>}<div className="row end"><button className="btn" onClick={() => setZoom(null)}>Fermer</button></div></div></div>}
+  </div>);
+}
+const VIZ_Q = new Set(['ex7q4', 'ex8q1', 'ex8q5', 'synq7']);
+
 /* ============ 4. PDF ============ */
 const NAVY = [16, 32, 64];
 const fontUrl = f => new URL('fonts/' + f, document.baseURI).href;
@@ -513,7 +707,7 @@ async function fetchFont(f) {
   if (!['00010000', '74727565', '4f54544f'].includes(sig)) throw new Error(`fonts/${f} n’est pas une police TTF valide (fichier absent de public/fonts ?)`);
   let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s);
 }
-const hasWork = (d, id) => !!(d.answers[id]?.t || '').trim() || Object.values(d.tables?.[id] || {}).some(v => String(v).trim());
+const hasWork = (d, id) => !!(d.answers[id]?.t || '').trim() || Object.values(d.tables?.[id] || {}).some(v => String(v).trim()) || (d.images?.[id]?.length || 0) > 0;
 async function makePdf(d) {
   let stage = 'initialisation'; const S = s => { stage = s; }; const warn = [];
   try {
@@ -606,7 +800,19 @@ async function makePdf(d) {
         S(`question ${e.id}/${q.n}`); ens(34); txt(`Question ${q.n}`, { size: 11, bold: true, color: NAVY, gap: 0.5 }); md(q.t); y += 0.5;
         if (TABLES[q.id]) { S(`tableau ${q.id}`); statPdf(TABLES[q.id], tb[q.id] || {}); }
         const a = (d.answers[q.id]?.t || '').trim(); S(`réponse ${q.id}`);
-        txt(a ? 'Réponse rédigée de l’étudiant :' : 'Réponse rédigée de l’étudiant : (aucune réponse rédigée)', { size: 9, bold: true, gap: 0.8 }); if (a) md(a, 3); y += 4;
+        txt(a ? 'Réponse rédigée de l’étudiant :' : 'Réponse rédigée de l’étudiant : (aucune réponse rédigée)', { size: 9, bold: true, gap: 0.8 }); if (a) md(a, 3);
+        const ims = d.images?.[q.id] || [];
+        if (ims.length) {
+          S(`images ${q.id}`); txt(`Image(s) importée(s) par l’étudiant : ${ims.length}`, { size: 9, bold: true, gap: 0.8 });
+          for (const m of ims) {
+            try {
+              const pr = doc.getImageProperties(m.data); let w = Math.min(CW - 6, 120), h = w * pr.height / pr.width; if (h > 85) { h = 85; w = h * pr.width / pr.height; }
+              ens(h + 10); doc.addImage(m.data, 'JPEG', M + 3, y, w, h); y += h + 2;
+              if (m.cap) txt(m.cap, { size: 8.5, color: [90, 90, 90], x: M + 3, w: CW - 6, gap: 2 }); else y += 2;
+            } catch (e) { console.warn('[PDF] image ignorée', e); warn.push('une image n’a pas pu être insérée'); }
+          }
+        }
+        y += 4;
       }
     }
 
@@ -654,6 +860,10 @@ export default function App() {
   const setAns = (id, t) => upd(s => { const now = new Date().toISOString(); return { ...s, answers: { ...s.answers, [id]: { ...s.answers[id], t, u: now } }, hist: stamp(s, id, words(t), now) }; });
   const setCell = (id, key, v) => upd(s => { const now = new Date().toISOString(); const nt = { ...(s.tables?.[id] || {}) }; if (v === '') delete nt[key]; else nt[key] = v;
     return { ...s, tables: { ...s.tables, [id]: nt }, answers: { ...s.answers, [id]: { ...s.answers[id], t: s.answers[id]?.t || '', u: now } }, hist: stamp(s, id, Object.keys(nt).length, now) }; });
+  const touch = (s, id, now) => ({ ...s.answers, [id]: { ...s.answers[id], t: s.answers[id]?.t || '', u: now } });
+  const addImg = (id, img) => upd(s => { const now = new Date().toISOString(); const list = [...(s.images?.[id] || []), img]; return { ...s, images: { ...(s.images || {}), [id]: list }, answers: touch(s, id, now), hist: stamp(s, id, list.length, now) }; });
+  const delImg = (id, iid) => upd(s => { const now = new Date().toISOString(); return { ...s, images: { ...(s.images || {}), [id]: (s.images?.[id] || []).filter(m => m.id !== iid) }, answers: touch(s, id, now) }; });
+  const capImg = (id, iid, cap) => upd(s => ({ ...s, images: { ...(s.images || {}), [id]: (s.images?.[id] || []).map(m => (m.id === iid ? { ...m, cap } : m)) } }));
   const markDone = (id, v) => upd(s => ({ ...s, answers: { ...s.answers, [id]: { ...s.answers[id], t: s.answers[id]?.t || '', done: v, u: new Date().toISOString() } } }));
   const exI = EXERCISES.findIndex(e => e.id === view);
   const next = () => { if (qi < ex.qs.length - 1) setQi(qi + 1); else go(EXERCISES[exI + 1]?.id || 'quiz'); };
@@ -667,7 +877,7 @@ export default function App() {
     const s = stRef.current; const norm = JSON.stringify({ sid: s.sid, st: s.student, a: ALLQ.map(x => [x.id, (s.answers[x.id]?.t || '').trim()]), tb: s.tables || {}, z: s.quiz ? [s.quiz.order, s.quiz.ans] : null });
     const hash = await sha256(norm); const rid = 'RPT-' + uid().replace(/-/g, '').slice(0, 12).toUpperCase(); const code = (hash ? hash.slice(0, 10) : uid().replace(/-/g, '').slice(0, 10)).toUpperCase();
     upd(x => ({ ...x, fin: { at: new Date().toISOString(), rid, code, hash, sec: secRef.current }, hist: [...x.hist, { t: new Date().toISOString(), e: 'finalisation' }] })); setBusy(false); notify('Travail finalisé. Vous pouvez télécharger le rapport PDF.'); };
-  const snapshot = () => ({ student: st.student, sid: st.sid, rid: st.fin.rid, code: st.fin.code, hash: st.fin.hash, at: st.fin.at, sec: st.fin.sec, answers: st.answers, tables: st.tables || {}, hist: st.hist.filter(h => h.q), grade: { ...g, rows: g.rows.map(r => ({ ...r, why: r.q.why })) } });
+  const snapshot = () => ({ student: st.student, sid: st.sid, rid: st.fin.rid, code: st.fin.code, hash: st.fin.hash, at: st.fin.at, sec: st.fin.sec, answers: st.answers, tables: st.tables || {}, images: st.images || {}, hist: st.hist.filter(h => h.q), grade: { ...g, rows: g.rows.map(r => ({ ...r, why: r.q.why })) } });
   const pdf = async () => { setBusy(true);
     try { const r = await makePdf(snapshot()); notify(`Rapport PDF généré (${r.pages} pages, ${Math.max(1, Math.round(r.size / 1024))} Ko).${r.warn.length ? ' Attention : ' + r.warn.join(', ') + '.' : ''}`, r.warn.length > 0); }
     catch (e) { console.error(`[PDF] échec à l’étape « ${e.stage || 'inconnue'} »`, e); notify(`Échec de la génération du PDF à l’étape « ${e.stage || 'inconnue'} » : ${String(e.message || e).slice(0, 180)}. Ouvrez la console (F12) pour le détail ; la sauvegarde .json reste disponible.`, true); }
@@ -687,6 +897,9 @@ export default function App() {
   const items = [['dash', 'Tableau de bord', '▣'], ['ex7', 'Exercice 7', '7'], ['ex8', 'Exercice 8', '8'], ['syn', 'Synthèse', 'Σ'], ['quiz', 'Test final', '✓'], ['review', 'Rapport', '⇩']];
   const lockMsg = locked && <div className="note" role="status">Travail finalisé : les modifications sont verrouillées. <button className="link" onClick={() => go('review')}>Reprendre le travail</button></div>;
   const def = q ? TABLES[q.id] : null;
+  const calc = q && CALC[q.id] ? CALC[q.id] : null; const viz = q ? VIZ_Q.has(q.id) : false;
+  let sn = 0; const nDef = def ? ++sn : 0; const nCalc = calc ? ++sn : 0; const nRed = ++sn; const nHelp = q && HELP[q.id] ? ++sn : 0; const nViz = viz ? ++sn : 0;
+  const imgTotal = Object.values(st.images || {}).flat().reduce((n, m) => n + (m?.data?.length || 0), 0);
   const cnt = ex ? ex.qs.reduce((a, x) => { const s = status(st, x.id); a[s] = (a[s] || 0) + 1; return a; }, {}) : {};
   return shell(<>
     <aside className="side"><div className="brand"><b>FSBM</b><span>{MODULE.mod} · {MODULE.sem}</span></div>
@@ -712,11 +925,15 @@ export default function App() {
         <article className="card qcard">
           <div className="qhead"><span className="qnum" aria-hidden="true">{q.n}</span><div className="grow"><p className="eyebrow">{ex.title.split(' : ')[0]} · Question {q.n} sur {ex.qs.length}</p></div><Badge s={status(st, q.id)} /></div>
           <div className="qtext"><MD>{q.t}</MD></div>
-          {def && <><h3 className="sec"><span>1</span> Tableau à compléter</h3>
+          {def && <><h3 className="sec"><span>{nDef}</span> Tableau à compléter</h3>
             <StatTable key={q.id} def={def} vals={st.tables?.[q.id] || {}} locked={locked} onCell={(k, v) => setCell(q.id, k, v)} onClear={() => setModal('cleartbl')} /></>}
-          <h3 className="sec">{def && <span>2</span>} Rédaction de la réponse</h3>
+          {calc && <><h3 className="sec"><span>{nCalc}</span> Tableau de calcul automatique</h3>
+            <CalcLab key={q.id} id={q.id} st={st} upd={upd} locked={locked} /></>}
+          <h3 className="sec">{(def || calc) && <span>{nRed}</span>} Rédaction de la réponse</h3>
           <Editor key={q.id} value={st.answers[q.id]?.t || ''} onChange={t => setAns(q.id, t)} disabled={locked} />
-          {HELP[q.id] && <><h3 className="sec"><span>{def ? 3 : 2}</span> Indices et correction détaillée</h3><Help key={q.id} id={q.id} st={st} upd={upd} ready={answered(st, q.id)} /></>}
+          {HELP[q.id] && <><h3 className="sec"><span>{nHelp}</span> Indices et correction détaillée</h3><Help key={q.id} id={q.id} st={st} upd={upd} ready={answered(st, q.id)} /></>}
+          {viz && <><h3 className="sec"><span>{nViz}</span> Espace de visualisation : importer un diagramme</h3>
+            <VizSpace key={q.id} id={q.id} imgs={st.images?.[q.id] || []} total={imgTotal} locked={locked} onAdd={m => addImg(q.id, m)} onDel={i => delImg(q.id, i)} onCap={(i, c) => capImg(q.id, i, c)} notify={notify} /></>}
           <div className="row wrap actions"><button className="btn" onClick={() => qi ? setQi(qi - 1) : exI > 0 ? go(EXERCISES[exI - 1].id, EXERCISES[exI - 1].qs.length - 1) : go('dash')}>← Retour</button>
             <button className="btn" disabled={locked} onClick={() => { persist(); notify(save.s === 'error' ? 'L’enregistrement a échoué.' : 'Réponse enregistrée localement.', save.s === 'error'); }}>Enregistrer</button>
             <button className="btn" disabled={locked || !textWords(st, q.id)} onClick={() => setModal('clear')}>Effacer le texte</button><span className="grow" />
@@ -992,4 +1209,45 @@ code{font-family:var(--mono);background:var(--accs);padding:2px 8px;border-radiu
 .bottom{display:flex;position:fixed;left:0;right:0;bottom:0;background:linear-gradient(180deg,var(--navy2),var(--navy));color:#fff;z-index:40;padding:6px 6px calc(6px + env(safe-area-inset-bottom,0px));box-shadow:0 -8px 24px -10px rgba(0,0,0,.55)}
 .bottom .nav{flex-direction:column;gap:3px;padding:6px 2px;font-size:.68rem;text-align:center;align-items:center}
 .bottom .nav:hover:not(:disabled){transform:none}
-.bottom .nav.on{transform:none}}`;
+.bottom .nav.on{transform:none}}
+
+/* ====== Atelier de calcul (colonnes calculées, ligne Σ) ====== */
+.app table.stat.calc td{padding:9px 10px;font-weight:500}
+.app table.stat.calc td.given{font-weight:600}
+.app table.stat.calc tr.total td:first-child{font-weight:800;font-size:1.05rem;color:var(--acc)}
+.app table.stat.calc td.nosum{color:var(--mut);font-weight:500}
+.app table.stat.calc th{position:relative;white-space:nowrap}
+.colx{margin-left:8px;border:0;background:rgba(255,255,255,.2);color:#fff;border-radius:6px;width:20px;height:20px;line-height:1;font-size:.95rem;cursor:pointer;vertical-align:middle;transition:background .15s}
+.colx:hover{background:var(--bad)}
+.calc-presets{margin:10px 0 4px}
+.calc-op{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:14px;padding:14px 16px;border:1px dashed var(--line2);border-radius:var(--r-md);background:var(--panel)}
+.calc-op .calc-ttl{width:100%;font-size:.9rem;color:var(--ink)}
+.calc-op label{display:flex;flex-direction:column;gap:4px;margin:0}
+.calc-op label>span{font-size:.76rem;font-weight:600;color:var(--ink2)}
+.calc-op select,.calc-op input{font:inherit;font-size:.9rem;height:42px;border:1.5px solid var(--line);border-radius:var(--r-sm);background:var(--panel);color:var(--ink);padding:0 10px;max-width:100%;transition:border-color .18s,box-shadow .18s}
+.calc-op input{width:110px;text-align:center}
+.calc-op select:focus,.calc-op input:focus{border-color:var(--acc);box-shadow:var(--ring);outline:none}
+.calc-op input[aria-invalid=true]{border-color:var(--bad)}
+.calc-op select:disabled,.calc-op input:disabled{opacity:.6}
+.calc-op .opsym{font-size:1.3rem;font-weight:700;color:var(--acc);padding-bottom:7px}
+.calc-prev{min-height:42px;display:flex;align-items:center;flex:1;min-width:170px}
+.calc-res{margin-top:14px;padding:14px 20px 6px;border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:var(--r-md);background:var(--panel)}
+.calc-res .eyebrow{margin:0 0 4px}
+.calc-res .md .katex-display{margin:.7em 0}
+.calc-note{margin:.5rem 0 .6rem}
+
+/* ====== Espace de visualisation (import d'images) ====== */
+.viz-drop{border:2px dashed var(--line2);border-radius:var(--r-lg);padding:22px;text-align:center;background:var(--panel2);transition:border-color .2s,background .2s}
+.viz-drop.over{border-color:var(--acc);background:var(--accs)}
+.viz-drop p{margin:8px 0 0}
+.viz-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;margin-top:16px}
+.viz-item{margin:0;border:1px solid var(--line);border-radius:var(--r-md);background:var(--panel);padding:10px;box-shadow:var(--sh-1)}
+.viz-item img{width:100%;height:auto;max-height:260px;object-fit:contain;display:block;border-radius:8px;background:#fff;cursor:zoom-in}
+.viz-item figcaption{margin-top:8px}
+.viz-cap{width:100%;font:inherit;font-size:.88rem;height:38px;border:1.5px solid var(--line);border-radius:var(--r-sm);background:var(--panel);color:var(--ink);padding:0 10px}
+.viz-cap:focus{border-color:var(--acc);box-shadow:var(--ring);outline:none}
+.viz-item .row{margin-top:8px;gap:8px}
+.viz-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:48%}
+.lightbox{background:var(--panel);border-radius:var(--r-lg);padding:16px;max-width:min(96vw,1240px);max-height:94vh;overflow:auto;box-shadow:var(--sh-3)}
+.lightbox img{display:block;max-width:100%;max-height:78vh;margin:0 auto;background:#fff;border-radius:10px}
+@media(max-width:860px){.calc-op input,.calc-op select{height:44px}.viz-grid{grid-template-columns:1fr}.lightbox{padding:10px}}`;
