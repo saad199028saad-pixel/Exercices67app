@@ -212,7 +212,7 @@ const SERIES = {
 const CALC = { ex7q2: { s: 's7', preset: 'mean' }, ex7q3: { s: 's7', preset: 'var' }, ex7q5: { s: 's7', preset: 'var' },
   ex8q2: { s: 's8', preset: 'var' }, ex8q3: { s: 's8', preset: 'var' },
   synq2: { s: 's9', preset: 'mean' }, synq5: { s: 's9', preset: 'var' }, synq6: { s: 's9', preset: 'var' } };
-const MAXCOLS = 12;
+const MAXCOLS = 12; const ROWS0 = 6; const MAXROWS = 30;
 const OPS = { mul: { sym: '×', name: 'Multiplication', bin: true }, add: { sym: '+', name: 'Addition', bin: true },
   sub: { sym: '−', name: 'Soustraction', bin: true }, sq: { sym: '²', name: 'Élévation au carré', bin: false } };
 const OPF = { mul: (p, q) => p * q, add: (p, q) => p + q, sub: (p, q) => p - q, sq: p => p * p };
@@ -610,29 +610,44 @@ $$
   return md;
 };
 function CalcLab({ id, st, upd, locked }) {
-  const cfg = CALC[id]; const series = SERIES[cfg.s]; const stored = st.calc?.[id]?.cols;
-  const specs = useMemo(() => stored ?? applyPreset(series, [], cfg.preset), [stored, series, cfg.preset]);
-  const ev = useMemo(() => evalCols(series, specs), [series, specs]);
-  const res = useMemo(() => calcResults(ev), [ev]);
+  const cfg = CALC[id]; const base = SERIES[cfg.s]; const store = st.calc?.[id]; const stored = store?.cols;
+  const specs = useMemo(() => stored ?? [], [stored]);
+  /* Tableau vide au départ : x_i et n_i sont saisis par l'étudiant (aucune colonne dérivée n'est préremplie). */
+  const xs = useMemo(() => store?.xs ?? Array(ROWS0).fill(''), [store?.xs]);
+  const ns = useMemo(() => store?.ns ?? Array(ROWS0).fill(''), [store?.ns]);
+  const px = useMemo(() => xs.map(v => parseNum(v)), [xs]); const pn = useMemo(() => ns.map(v => parseNum(v)), [ns]);
+  const series = useMemo(() => ({ ...base, x: px.map(p => (p ? p.v : NaN)), n: pn.map(p => (p ? p.v : NaN)) }), [base, px, pn]);
+  const ev = useMemo(() => evalCols(series, specs).map(c => { const f = c.vals.filter(Number.isFinite); return { ...c, tot: f.length ? r12(sum(f)) : NaN }; }), [series, specs]);
+  /* Les résultats ne sont calculés que si toutes les lignes saisies sont complètes ; ils découlent ensuite des colonnes créées. */
+  const rowState = xs.map((v, i) => { const bx = !String(v).trim(), bn = !String(ns[i]).trim(); return bx && bn ? 'blank' : px[i] && pn[i] ? 'ok' : 'bad'; });
+  const dataOk = rowState.includes('ok') && !rowState.includes('bad');
+  const res = useMemo(() => (dataOk ? calcResults(ev) : {}), [ev, dataOk]);
   const [op, setOp] = useState('mul'); const [a, setA] = useState('n'); const [b, setB] = useState('x'); const [ks, setKs] = useState('');
   const ids = ev.map(c => c.id); const A = ids.includes(a) ? a : ids[0]; const B = b === '#k' || ids.includes(b) ? b : ids[0];
   const bin = OPS[op].bin; const kp = bin && B === '#k' ? parseNum(ks) : null; const ready = !bin || B !== '#k' || !!kp; const full = specs.length >= MAXCOLS;
   const draft = { id: nextId(specs), op, a: A, b: bin && B !== '#k' ? B : null, k: kp ? kp.v : null };
   const pe = ready ? evalCols(series, [...specs, draft]) : ev; const ph = ready && pe.length > ev.length ? pe[pe.length - 1].h : null;
-  const setSpecs = next => upd(s => ({ ...s, calc: { ...(s.calc || {}), [id]: { cols: next } } }));
+  const patch = f => upd(s => { const cur = s.calc?.[id] || {}; return { ...s, calc: { ...(s.calc || {}), [id]: { ...cur, ...f(cur) } } }; });
+  const setSpecs = next => patch(() => ({ cols: next }));
+  const setCell = (k, i, v) => patch(cur => { const a = [...(cur[k] ?? Array(ROWS0).fill(''))]; a[i] = v; return { [k]: a }; });
+  const addRow = () => patch(cur => ({ xs: [...(cur.xs ?? Array(ROWS0).fill('')), ''], ns: [...(cur.ns ?? Array(ROWS0).fill('')), ''] }));
+  const delRow = () => patch(cur => ({ xs: (cur.xs ?? Array(ROWS0).fill('')).slice(0, -1), ns: (cur.ns ?? Array(ROWS0).fill('')).slice(0, -1) }));
   const reset = () => upd(s => { const c = { ...(s.calc || {}) }; delete c[id]; return { ...s, calc: c }; });
   const md = calcMd(series, res); const missing = [res.mean == null && 'la moyenne', res.var == null && 'la variance et l’écart-type'].filter(Boolean);
+  const anyData = rowState.some(r => r !== 'blank');
   return (<div className="stat-wrap calc-wrap">
     <div className="stat-head"><h3>Tableau de calcul : {series.label}</h3><span className="badge">{specs.length} colonne(s) calculée(s)</span></div>
-    <p className="small muted">{series.info} Les colonnes calculées et la ligne Σ se mettent à jour automatiquement. Cet outil est une aide : il ne remplit pas vos tableaux et n’affecte pas votre progression.</p>
+    <p className="small muted">{series.info} Saisissez vous-même les valeurs de <TeX>{series.xh}</TeX> et de <TeX>n_i</TeX>, puis créez les colonnes dont vous avez besoin avec les opérations entre colonnes. Les colonnes créées et la ligne Σ se mettent à jour automatiquement. Cet outil est une aide : il ne remplit pas vos tableaux et n’affecte pas votre progression.</p>
     <div className="row wrap calc-presets">
-      <button className="btn" disabled={locked || full} onClick={() => setSpecs(applyPreset(series, specs, 'mean'))}>Colonnes pour la moyenne</button>
-      <button className="btn" disabled={locked || full} onClick={() => setSpecs(applyPreset(series, specs, 'var'))}>Colonnes pour la variance et l’écart-type</button>
-      <button className="btn" disabled={locked || !stored} onClick={reset}>Réinitialiser</button></div>
+      <button className="btn" disabled={locked || xs.length >= MAXROWS} onClick={addRow}>Ajouter une ligne</button>
+      <button className="btn" disabled={locked || xs.length <= 1} onClick={delRow}>Supprimer la dernière ligne</button>
+      <button className="btn" disabled={locked || !store} onClick={reset}>Réinitialiser</button></div>
     <div className="tscroll"><table className="stat calc"><caption>{series.label} : valeurs, effectifs et colonnes calculées (Σ = total de la colonne).</caption>
       <thead><tr>{ev.map(c => <th key={c.id} scope="col"><TeX>{c.h}</TeX>{!c.base && !locked && <button className="colx" title="Supprimer cette colonne (et celles qui en dépendent)" aria-label={`Supprimer la colonne ${plain(c.h)}`} onClick={() => setSpecs(removeCol(specs, c.id))}>×</button>}</th>)}</tr></thead>
-      <tbody>{series.x.map((_, i) => <tr key={i}>{ev.map(c => <td key={c.id} className={c.base ? 'given' : ''}>{fmtNum(c.vals[i])}</td>)}</tr>)}
-        <tr className="total">{ev.map((c, j) => <td key={c.id} className={!j ? '' : c.usesN ? '' : 'nosum'} title={!j || c.usesN ? undefined : 'Cette colonne ne tient pas compte des effectifs : sa somme est donnée à titre indicatif.'}>{!j ? 'Σ' : fmtNum(c.tot)}</td>)}</tr></tbody></table></div>
+      <tbody>{xs.map((_, i) => <tr key={i}>{ev.map((c, j) => c.base
+          ? <td key={c.id}><input className="cin" value={j ? ns[i] : xs[i]} disabled={locked} inputMode="decimal" autoComplete="off" spellCheck="false" aria-label={`${plain(c.h)}, ligne ${i + 1}`} aria-invalid={rowState[i] === 'bad'} onChange={e => setCell(j ? 'ns' : 'xs', i, sanitizeCell(e.target.value))} /></td>
+          : <td key={c.id}>{Number.isFinite(c.vals[i]) ? fmtNum(c.vals[i]) : ''}</td>)}</tr>)}
+        <tr className="total">{ev.map((c, j) => <td key={c.id} className={!j ? '' : c.usesN ? '' : 'nosum'} title={!j || c.usesN ? undefined : 'Cette colonne ne tient pas compte des effectifs : sa somme est donnée à titre indicatif.'}>{!j ? 'Σ' : Number.isFinite(c.tot) ? fmtNum(c.tot) : ''}</td>)}</tr></tbody></table></div>
     <div className="calc-op" role="group" aria-label="Opération entre colonnes">
       <b className="calc-ttl">Nouvelle colonne</b>
       <label><span>Opération</span><select value={op} disabled={locked || full} onChange={e => setOp(e.target.value)}>{Object.entries(OPS).map(([k, o]) => <option key={k} value={k}>{o.name} ({o.sym})</option>)}</select></label>
@@ -643,9 +658,10 @@ function CalcLab({ id, st, upd, locked }) {
       <div className="calc-prev small">{ph ? <>Résultat : <TeX>{ph}</TeX></> : <span className="muted">{ready ? '' : 'Saisissez une constante valide.'}</span>}</div>
       <button className="btn primary" disabled={locked || full || !ready} onClick={() => setSpecs([...specs, draft])}>Créer la colonne</button></div>
     {full && <p className="small muted">Nombre maximal de colonnes calculées atteint ({MAXCOLS}) : supprimez-en une pour continuer.</p>}
-    {(md || missing.length > 0) && <div className="calc-res" role="status" aria-live="polite"><p className="eyebrow">Résultats déduits des totaux Σ</p>
+    {(md || (anyData && missing.length > 0)) && <div className="calc-res" role="status" aria-live="polite"><p className="eyebrow">Résultats déduits des totaux Σ</p>
       {md && <MD>{md}</MD>}
-      {missing.length > 0 && <p className="small muted">Pour obtenir {missing.join(' et ')}, utilisez les boutons ci-dessus ou créez vous-même les colonnes nécessaires avec les opérations entre colonnes.</p>}
+      {!dataOk && <p className="small muted">Complétez chaque ligne commencée (une valeur de <TeX>{series.xh}</TeX> et son effectif <TeX>n_i</TeX>) pour que les résultats puissent être calculés.</p>}
+      {dataOk && missing.length > 0 && <p className="small muted">Pour obtenir {missing.join(' et ')}, créez vous-même les colonnes nécessaires avec les opérations entre colonnes.</p>}
       <div className="small muted calc-note">Variance : formule de König-Huygens avec division par <TeX>n</TeX>, comme dans l’énoncé.</div></div>}
   </div>);
 }
@@ -707,6 +723,17 @@ async function fetchFont(f) {
   if (!['00010000', '74727565', '4f54544f'].includes(sig)) throw new Error(`fonts/${f} n’est pas une police TTF valide (fichier absent de public/fonts ?)`);
   let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s);
 }
+/* Rapport : reconstitue, en lecture seule, le tableau de calcul construit par l'étudiant (même logique que CalcLab : x_i, n_i saisis + colonnes créées). */
+const calcSnap = (id, store) => {
+  const base = SERIES[CALC[id].s]; const specs = store?.cols ?? [];
+  const xs = store?.xs ?? Array(ROWS0).fill(''); const ns = store?.ns ?? Array(ROWS0).fill('');
+  const px = xs.map(v => parseNum(v)); const pn = ns.map(v => parseNum(v));
+  const series = { ...base, x: px.map(p => (p ? p.v : NaN)), n: pn.map(p => (p ? p.v : NaN)) };
+  const ev = evalCols(series, specs).map(c => { const f = c.vals.filter(Number.isFinite); return { ...c, tot: f.length ? r12(sum(f)) : NaN }; });
+  const rowState = xs.map((v, i) => { const bx = !String(v).trim(), bn = !String(ns[i]).trim(); return bx && bn ? 'blank' : px[i] && pn[i] ? 'ok' : 'bad'; });
+  const dataOk = rowState.includes('ok') && !rowState.includes('bad');
+  return { base, series, xs, ns, ev, rowState, dataOk, res: dataOk ? calcResults(ev) : {}, anyData: rowState.some(r => r !== 'blank') || specs.length > 0 };
+};
 const hasWork = (d, id) => !!(d.answers[id]?.t || '').trim() || Object.values(d.tables?.[id] || {}).some(v => String(v).trim()) || (d.images?.[id]?.length || 0) > 0;
 async function makePdf(d) {
   let stage = 'initialisation'; const S = s => { stage = s; }; const warn = [];
@@ -775,6 +802,22 @@ async function makePdf(d) {
         didParseCell: h => { if (h.section === 'body') { const isT = h.row.index === def.rows.length; if (isT) h.cell.styles.fontStyle = 'bold'; if (gi.has(h.column.index) && !isT) h.cell.styles.fillColor = [235, 239, 246]; if (String(h.cell.raw) === '—') h.cell.styles.fillColor = [245, 245, 245]; } } });
     };
 
+    const calcPdf = (id, store) => {
+      const k = calcSnap(id, store); if (!k.anyData) return;
+      const made = k.ev.length - 2; const uses = [k.res.mean != null && 'la moyenne', k.res.var != null && 'la variance et l’écart-type'].filter(Boolean);
+      txt(`Tableau de calcul construit par l’étudiant : ${k.base.label}`, { size: 9.5, bold: true, color: NAVY, gap: 0.6 });
+      txt(`Colonnes de base saisies : $${k.base.xh}$ et $n_i$ — colonnes créées par l’étudiant : ${made}${uses.length ? ' — tableau permettant le calcul de ' + uses.join(' et de ') : ''}.`, { size: 8.5, color: [90, 90, 90], gap: 1.2 });
+      const rows = k.xs.map((_, i) => i).filter(i => k.rowState[i] !== 'blank');
+      const body = rows.map(i => k.ev.map((c, j) => (c.base ? normCell(j ? k.ns[i] : k.xs[i]) : Number.isFinite(c.vals[i]) ? fmtNum(c.vals[i]) : '')));
+      body.push(['Σ', ...k.ev.slice(1).map(c => (Number.isFinite(c.tot) ? fmtNum(c.tot) : ''))]);
+      const last = body.length - 1;
+      tbl(k.ev.map(c => '$' + c.h + '$'), body, { theme: 'grid', styles: { font: FN, fontSize: k.ev.length > 7 ? 8 : 9, cellPadding: 1.8, halign: 'center', valign: 'middle', overflow: 'linebreak', minCellHeight: 7 },
+        didParseCell: h => { if (h.section === 'body') { if (h.row.index === last) { h.cell.styles.fontStyle = 'bold'; h.cell.styles.fillColor = [235, 239, 246]; } else if (h.column.index < 2) h.cell.styles.fillColor = [248, 249, 252]; } } });
+      const rs = calcMd(k.base, k.res);
+      if (rs) { txt('Résultats déduits des totaux Σ', { size: 9, bold: true, gap: 0.8 }); md(rs, 3); txt('Variance : formule de König-Huygens avec division par $n$.', { size: 8, color: [110, 110, 110], gap: 1.5 }); }
+      else txt('Résultats : non calculés (tableau incomplet ou colonnes nécessaires non créées par l’étudiant).', { size: 8.5, color: [110, 110, 110], gap: 1.5 });
+    };
+
     /* ---- Page de garde ---- */
     S('page de garde');
     doc.setFillColor(...NAVY); doc.rect(0, 0, W, 62, 'F'); doc.setTextColor(255, 255, 255); doc.setFont(FN, 'bold'); doc.setFontSize(16); doc.text(clean(MODULE.univ), M, 22);
@@ -799,6 +842,7 @@ async function makePdf(d) {
       for (const q of e.qs) {
         S(`question ${e.id}/${q.n}`); ens(34); txt(`Question ${q.n}`, { size: 11, bold: true, color: NAVY, gap: 0.5 }); md(q.t); y += 0.5;
         if (TABLES[q.id]) { S(`tableau ${q.id}`); statPdf(TABLES[q.id], tb[q.id] || {}); }
+        if (CALC[q.id]) { S(`tableau de calcul ${q.id}`); calcPdf(q.id, d.calc?.[q.id]); }
         const a = (d.answers[q.id]?.t || '').trim(); S(`réponse ${q.id}`);
         txt(a ? 'Réponse rédigée de l’étudiant :' : 'Réponse rédigée de l’étudiant : (aucune réponse rédigée)', { size: 9, bold: true, gap: 0.8 }); if (a) md(a, 3);
         const ims = d.images?.[q.id] || [];
@@ -877,7 +921,7 @@ export default function App() {
     const s = stRef.current; const norm = JSON.stringify({ sid: s.sid, st: s.student, a: ALLQ.map(x => [x.id, (s.answers[x.id]?.t || '').trim()]), tb: s.tables || {}, z: s.quiz ? [s.quiz.order, s.quiz.ans] : null });
     const hash = await sha256(norm); const rid = 'RPT-' + uid().replace(/-/g, '').slice(0, 12).toUpperCase(); const code = (hash ? hash.slice(0, 10) : uid().replace(/-/g, '').slice(0, 10)).toUpperCase();
     upd(x => ({ ...x, fin: { at: new Date().toISOString(), rid, code, hash, sec: secRef.current }, hist: [...x.hist, { t: new Date().toISOString(), e: 'finalisation' }] })); setBusy(false); notify('Travail finalisé. Vous pouvez télécharger le rapport PDF.'); };
-  const snapshot = () => ({ student: st.student, sid: st.sid, rid: st.fin.rid, code: st.fin.code, hash: st.fin.hash, at: st.fin.at, sec: st.fin.sec, answers: st.answers, tables: st.tables || {}, images: st.images || {}, hist: st.hist.filter(h => h.q), grade: { ...g, rows: g.rows.map(r => ({ ...r, why: r.q.why })) } });
+  const snapshot = () => ({ student: st.student, sid: st.sid, rid: st.fin.rid, code: st.fin.code, hash: st.fin.hash, at: st.fin.at, sec: st.fin.sec, answers: st.answers, tables: st.tables || {}, calc: st.calc || {}, images: st.images || {}, hist: st.hist.filter(h => h.q), grade: { ...g, rows: g.rows.map(r => ({ ...r, why: r.q.why })) } });
   const pdf = async () => { setBusy(true);
     try { const r = await makePdf(snapshot()); notify(`Rapport PDF généré (${r.pages} pages, ${Math.max(1, Math.round(r.size / 1024))} Ko).${r.warn.length ? ' Attention : ' + r.warn.join(', ') + '.' : ''}`, r.warn.length > 0); }
     catch (e) { console.error(`[PDF] échec à l’étape « ${e.stage || 'inconnue'} »`, e); notify(`Échec de la génération du PDF à l’étape « ${e.stage || 'inconnue'} » : ${String(e.message || e).slice(0, 180)}. Ouvrez la console (F12) pour le détail ; la sauvegarde .json reste disponible.`, true); }
@@ -1214,6 +1258,10 @@ code{font-family:var(--mono);background:var(--accs);padding:2px 8px;border-radiu
 /* ====== Atelier de calcul (colonnes calculées, ligne Σ) ====== */
 .app table.stat.calc td{padding:9px 10px;font-weight:500}
 .app table.stat.calc td.given{font-weight:600}
+.app table.stat.calc td input.cin{width:100%;min-width:76px;box-sizing:border-box;font:inherit;font-weight:600;text-align:center;height:36px;border:1.5px solid var(--line);border-radius:var(--r-sm);background:var(--panel);color:var(--ink);padding:0 8px;transition:border-color .18s,box-shadow .18s}
+.app table.stat.calc td input.cin:focus{border-color:var(--acc);box-shadow:var(--ring);outline:none}
+.app table.stat.calc td input.cin[aria-invalid=true]{border-color:var(--bad)}
+.app table.stat.calc td input.cin:disabled{opacity:.6}
 .app table.stat.calc tr.total td:first-child{font-weight:800;font-size:1.05rem;color:var(--acc)}
 .app table.stat.calc td.nosum{color:var(--mut);font-weight:500}
 .app table.stat.calc th{position:relative;white-space:nowrap}
